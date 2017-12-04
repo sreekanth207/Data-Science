@@ -1,0 +1,1428 @@
+---
+title: "Flight Delays Prediction / Analytics"
+author: "Sreekantha Thimmareddy"
+date: "22 Nov 2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Objective
+
+Have you ever been stuck in an airport because your flight was delayed or cancelled and wondered if you could have predicted it if you'd had more data? 
+This is to answer few questions in the context of Airline on-time performance:
+
+.	Which Airlines/carrier performs better?
+
+.	When is the best time of day/day of week/time of year to fly to minimise delays?
+
+.	Do older planes suffer more delays?
+
+.	Can you detect cascading failures as delays in one airport create delays in others? 
+
+.	Create a model to predict flight delays
+
+Note: All the delays are represented in minutes. 
+##Installing all required packaes
+```{r, message=FALSE, warning=FALSE}
+# Packages required
+#install.packages("devtools")
+#install.packages("rlang") # The package is failing hence using below frm github
+#devtools::install_github("tidyverse/rlang", build_vignettes = TRUE)
+#install.packages("shiny")
+#install.packages("dbplyr")
+#install.packages("digest")
+#install.packages("backports")
+#install.packages("sparklyr") #  If thee package is failing hence using below frm github
+#devtools::install_github("rstudio/sparklyr")
+#install.packages("sqldf")
+#install.packages("corrplot")  # For plotting co-relation
+#install.packages("Hmisc") # For co-relation and P values
+#install.packages("MASS")  # StepAIC function to choose variables
+#install.packages("caret")
+#install.packages("R.utils")
+
+library(corrplot)
+library(R.utils) 
+library(sqldf)
+library(data.table)
+library(caret)
+library(stats)
+library(devtools) 
+library(rlang)
+library(shiny)
+library(dbplyr)
+library(digest)
+library(backports)
+library(sparklyr)
+library(ggplot2)  #the cookbook for R: http://www.cookbook-r.com/Graphs/
+library(dplyr)
+library(DBI)  # For SQL on 
+#library(MASS)
+```
+
+## Loading and Processing Data
+
+
+```{r, message=FALSE, warning=FALSE,results='hide'}
+# Set Working dir
+setwd("D:/Data Science/Flight Data Analysis/")
+```
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+#Download data from Web
+#download.file(url="http://stat-computing.org/dataexpo/2009/2007.csv.bz2", destfile = "./Data/2007.csv.bz2")
+#download.file(url="http://stat-computing.org/dataexpo/2009/2008.csv.bz2", destfile = "./Data/2008.csv.bz2")
+#download.file(url="http://stat-computing.org/dataexpo/2009/airports.csv", destfile = "./Data/airports.csv")
+#download.file(url="http://stat-computing.org/dataexpo/2009/carriers.csv", destfile = "./Data/carriers.csv")
+#download.file(url="http://stat-computing.org/dataexpo/2009/plane-data.csv", destfile = "./Data/plane_data.csv")
+
+# Unzip files
+#bunzip2("./Data/new/2007.csv.bz2", "./Data/2007.csv", remove = FALSE, skip = TRUE)
+#bunzip2("./Data/new/2008.csv.bz2", "./Data/2008.csv", remove = FALSE, skip = TRUE)
+
+# Loading data files and working with sample set
+# Loading data files and working with sample set
+trips2007 <- fread("D:\\Data Science\\Flight Data Analysis\\Data\\2007.csv")  #Fastest way to load large files.
+
+trips2007a <- sample_n(trips2007, 100000)
+rm(trips2007)
+trips2007a <- as.data.table(trips2007a)
+
+trips2008 <- fread("D:\\Data Science\\Flight Data Analysis\\Data\\2008.csv")
+trips2008b <- sample_n(trips2008, 100000)
+rm(trips2008)
+trips2008b <- as.data.table(trips2008b)
+
+tripsfile <- rbind(trips2007a, trips2008b)
+
+# To free up unused files.
+rm(trips2007a, trips2008b)
+
+## Load other supporting files as well. = ",",header = TRUE)
+planedatafile <- read.csv2('D:\\Data Science\\Flight Data Analysis\\Data\\plane_data.csv',sep = ",",header = TRUE)
+airportsfile <- read.csv2('D:\\Data Science\\Flight Data Analysis\\Data\\airports.csv',sep = ",",header = TRUE)
+carriersfile <- read.csv2('D:\\Data Science\\Flight Data Analysis\\Data\\carriers.csv',sep = ",",header = TRUE)
+
+## This is to have copy of raw data untouched available for any reference.
+
+
+planedata <- planedatafile
+airports <- airportsfile
+carriers <- carriersfile
+trips <- tripsfile
+
+```
+
+## Feature Engineering
+
+```{r}
+summary(trips,message=FALSE, warning=FALSE)
+head(filter(trips,  WeatherDelay == 0 ))
+```
+We can see there are ~40% of values are NAs for WeatherDelay, NASDelays, SecurityDelay, LateAircraftDelay.
+We cannot eaither mark them as zero or backfill with other value. It's best to omit and use remaining data or exclude these variables in prediction. We can try both.
+And in other variables, small number of NAs present and we can omit them as well.
+
+```{r,echo=FALSE,message=FALSE, warning=FALSE,results='hide'}
+nrow(trips)
+trips <- na.omit(trips)
+nrow(trips)
+
+```
+
+Creating hour variables as the time is in HHMM format and not suitable for analysis.
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+trips$ArrHour <- trunc(trips$CRSArrTime/100) 
+trips$DepHour <- trunc(trips$CRSDepTime/100)
+```
+
+Deviding day into 4 time periods for analysis
+have devided 24 hours into 4 buckets. i.e new variables DepTimeOfDay, ArrTimeOfDay
+  - 12am to 5:59 am as 0 (Night)
+  - 6am to 11:59 am as 1 (Morning) 
+  - 12noon to 5:59pm (Afternoon)
+  - 6pm to 11:59pm (Evening)
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+trips$ArrTimeofday <- trunc(trips$ArrHour/6)
+trips$DepTimeofday <- trunc(trips$DepHour/6)
+``` 
+
+ To see week of month has any significance. It may.
+ 
+```{r,message=FALSE, warning=FALSE}
+
+trips$WeekOfMonth <- trunc(trips$DayofMonth/7+1)
+```
+
+Clearly based on data, the dependent variables are DepDelay and ArrDelay which is the total delay.
+Adding week of month.
+
+### Joining the supporting data set. 
+
+Now let us merge/join supporting data set. This is to make one big de-normalized flat table with all the data fields required available.
+This can be done after initial EDA as well to find out which fields ussually to be included/excluded.
+Since I did some exploration in previous versions of code so doing it ahead before EDA here. 
+First Planedata, not all fields are important. Also need to delete any NAs as we don't have source to backfill.
+
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+
+planedatanew <- planedata[, c("tailnum","type","manufacturer","aircraft_type","engine_type","year") ] 
+planedatanew <- na.omit(filter(planedatanew, year != "" ))
+planedatanew <- na.omit(planedatanew)
+
+#Now Left join two tables
+tripsplane <- merge(x=trips, y=planedatanew , by.x="TailNum", by.y="tailnum", all.x = TRUE)[]
+
+# Now let's use airports
+
+nrow(airports)
+airportsnew <- na.omit(airports[, c("iata","city", "state", "country")])
+nrow(airportsnew)
+
+#Merging for Origin Airports
+tripsplaneairports <- merge(x=tripsplane, y=airportsnew , by.x="Origin", by.y="iata", all.x = TRUE)[]
+setnames(tripsplaneairports, old = c("city", "state", "country"), new= c("Origincity", "Originstate", "Origincountry"))
+
+# Merging for Destination airports
+tripsplaneairports <- merge(x=tripsplaneairports, y=airportsnew , by.x="Dest", by.y="iata", all.x = TRUE)[]
+
+#Renaming the columns to reflect correctly
+setnames(tripsplaneairports, old = c("city", "state", "country"), new= c("Destcity", "Deststate", "Destcountry"))
+
+# Again some feature Engineering
+tripsplaneairports$planeAge <-  tripsplaneairports$Year  - as.numeric(as.character(tripsplaneairports$year))  
+str(tripsplaneairports$planeAge)
+
+
+# Let's create date out of year, month, Day of month
+
+ tripsplaneairports$TravelDate <- as.Date(with(tripsplaneairports, paste(Year, Month, DayofMonth,sep="-")), "%Y-%m-%d")
+
+```
+
+## Exploratory Data Analysis 
+
+
+### Before EDA let's set aside a set of data for independent evaluation of the model at the end.
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+set.seed(110)
+sub_ind <- sample(nrow(tripsplaneairports), floor(nrow(tripsplaneairports) * 0.2))
+
+trips_ind <- tripsplaneairports[sub_ind,]
+tripsplaneairports <- tripsplaneairports[-sub_ind,]
+```
+
+
+Let's do EDA and find out significance of the variables in predicting Flight Delays
+For Continous variables, we can use co-relation to see how y is co-related to x1, x2 etc.. which is a good starting point to include in the model. For Categorical variables, let's find if there are patterns.
+
+Also, let us try and answer some of the questions we defined in the objective.
+
+## Which Airlines/Carrier performs better ?
+
+This is bit generic question. We can make an assumption that the ask is in terms of flight delays
+
+```{r,message=FALSE, warning=FALSE}
+
+CarrierDelay <- tripsplaneairports %>% 
+                  group_by(UniqueCarrier) %>%
+                  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanNASDelay=mean(NASDelay)) %>%
+                  filter ( count > 1000, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+                  collect
+
+#plot
+ggplot(CarrierDelay, aes(UniqueCarrier, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) +  scale_size_area(max_size = 2)
+ggplot(CarrierDelay, aes(UniqueCarrier, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) +  scale_size_area(max_size = 2)
+
+# Same stuff with Bar chart.
+CarrierDelay %>% top_n(n=10,- MeanDepDelay ) %>% 
+ggplot( aes(reorder(UniqueCarrier, MeanDepDelay), MeanDepDelay)) + geom_bar( stat = "identity")  
+ggplot(CarrierDelay, aes(reorder(UniqueCarrier, MeanArrDelay), MeanArrDelay)) + geom_bar( stat = "identity")  
+
+```
+
+We can see that Carrier = WN has managed better on-time perfornance with Arrival
+better even with large number of trips(), while DL has done better with Departure
+
+Again, Carrier performance differs between Airport to Airport. 
+We can easily apply filter on Airport and get best parforming of Carrier. Or write a simple function to do the same.
+
+#### Origin Airports - Performance
+
+```{r,message=FALSE, warning=FALSE}
+
+OriginAirportDelay <- tripsplaneairports %>% 
+  group_by(Origin) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay=mean(WeatherDelay)) %>%
+  filter ( count > 2000, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+# Increasing count to 2000 for filtering in order to avoid too much cluttering.
+
+#plot
+ggplot(OriginAirportDelay, aes(Origin, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(OriginAirportDelay, aes(Origin, MeanWeatherDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+```
+
+Lax doing better for Departure. Weather is also not much impacted at LAX compared to others.
+However, except these airports, there is no perticular pattern we can observe. May be we need to combine other variables.
+
+
+##### Dest Airports - performance 
+
+```{r,message=FALSE, warning=FALSE}
+DestAirportDelay <- tripsplaneairports %>% 
+  group_by(Dest) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 2000, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+# 
+#plot
+ggplot(DestAirportDelay, aes(Dest, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+```
+
+PHX are doing very good with Arrival. And ORD is not so great. 
+
+
+
+## When is the best time of the day/week/month/year to travel to minimize delays ?
+
+```{r,message=FALSE, warning=FALSE}
+
+DayMonthDelay <- tripsplaneairports %>% 
+  group_by(Month) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 50, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+
+#plot
+ggplot(DayMonthDelay, aes(as.factor(Month), MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(DayMonthDelay, aes(Month, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(DayMonthDelay, aes(Month, MeanWeatherDelay2)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+
+```
+
+We can clearly see Sept, Oct, Nov are the best months to fly as the delays are very min.
+
+```{r,message=FALSE, warning=FALSE}
+DayofMonthDelay <- tripsplaneairports %>%
+  group_by(Month,DayofMonth) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 50, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+
+ggplot(DayofMonthDelay, aes(DayofMonth, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(DayofMonthDelay, aes(DayofMonth, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(DayofMonthDelay, aes(DayofMonth, MeanWeatherDelay2)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+# There is no patteren what so ever. No point in usng this as variable. However, we can try deviding the same by 7 and get the week info to see if there is a patteren.
+
+WeekOfMonthDelay <- tripsplaneairports %>%
+  group_by(Month,WeekOfMonth) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 50, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+
+
+ggplot(WeekOfMonthDelay, aes(WeekOfMonth, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(WeekOfMonthDelay, aes(WeekOfMonth, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+```
+You can see overall 2nd week is better in a month and 5th week(i.e month end - 29th, 30th 31st) is better time to fly.
+
+```{r,message=FALSE, warning=FALSE}
+TimeArrDelay <- tripsplaneairports %>%
+  group_by(ArrHour,ArrTimeofday) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 50, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+
+ggplot(TimeArrDelay, aes(ArrTimeofday, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+
+```
+
+Plan your flight such a way, your sheduled arrival is morning. i.e better overall.
+
+```{r,message=FALSE, warning=FALSE}
+TimeDepDelay <- tripsplaneairports %>%
+  group_by(DepTimeofday) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 50, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+
+ggplot(TimeDepDelay, aes(DepTimeofday, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+```
+
+Generally Departure delays keeps increasing as day prgress. So early morning flights are better.
+
+```{r,message=FALSE, warning=FALSE}
+HourDepDelay <- tripsplaneairports %>%
+  group_by(DepHour) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 50, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+
+ggplot(HourDepDelay, aes(DepHour, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+```
+
+Clearly 5-10am departures are better. and almost very negligible delays of less then ~10min. 
+
+```{r,message=FALSE, warning=FALSE}
+HourArrDelay <- tripsplaneairports %>%
+  group_by(ArrHour) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 50, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+
+ggplot(HourArrDelay, aes(ArrHour, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+```
+
+Clearly 5-10am departures are better. and almost very negligible delays of less then ~10min. 
+
+```{r,message=FALSE, warning=FALSE}
+DayOfWeekDelay <- tripsplaneairports %>%
+  group_by(DayOfWeek) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 50, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+
+ggplot(DayOfWeekDelay, aes(DayOfWeek, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(DayOfWeekDelay, aes(DayOfWeek, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+```
+
+Flight on Saturday seems to be better. Tuesday and Wednesday are ok too. Avoid Friday, Mon and Sun.
+Same applicable even on Arrival. 
+
+#### So, In summary:
+#### Best Month: Sept, Oct, Nov with avg delay of ~10 min delay both for Departure and Arrival. 
+#### Best Week: 2nd week of the month is best. Month ends are ok two. 
+#### Best Day: Saturday is the best day to travel(Both arrival and departure). Tuesday and Wednesday's are ok too. Avoid Thursday (Avg Delays: 30min) 
+#### Best Time of the day: 5am to 10 am is best for both Departure and Arrival: ~ 10 min delay.
+
+Note: This can differ from airport to airport and carrier to carrier. This is in-general with out specifically considering any of the conditions.
+If, we want to find based on a condition then we can do the same, by using additonal condition. 
+
+
+
+## Do older planes suffer more delays ?
+
+```{r,message=FALSE, warning=FALSE}
+planeAgeDelay <- tripsplaneairports %>%
+  filter(planeAge < 1500) %>%
+  group_by(planeAge) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 50, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+
+ggplot(planeAgeDelay, aes(planeAge, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(planeAgeDelay, aes(planeAge, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+```
+So, yes, older flights has more delays, but very old ones(>25 yesrs) seems to be having less delays though they are not much in use.
+
+
+
+#### Now let's look at Airports! This may have importance.
+
+```{r,message=FALSE, warning=FALSE}
+OriginAirportDelay <- tripsplaneairports %>%
+  group_by(Origin, Origincity, Originstate, Origincountry) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 2000, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+
+# Here increased the count, to study cities/states where major no of trips occoured.
+
+ggplot(OriginAirportDelay, aes(Origincountry, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(OriginAirportDelay, aes(Originstate, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(OriginAirportDelay, aes(Origincity, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(OriginAirportDelay, aes(Origin, MeanDepDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+```
+
+State seems to have relationship, not country. California seems to be best state and LOSAngles seems to be best city to fly from. Fligts from UT, CA and TN states are better in terms of departure.
+
+```{r,message=FALSE, warning=FALSE}
+str(tripsplaneairports)
+
+DestAirportDelay <- tripsplaneairports %>%
+  group_by(Dest, Destcity, Deststate, Destcountry) %>%
+  summarise(count=n(), MeanArrDelay = mean(ArrDelay), MeanDepDelay=mean(DepDelay), MeanWeatherDelay2=mean(WeatherDelay)) %>%
+  filter ( count > 2000, !is.na(MeanArrDelay), !is.na(MeanDepDelay) ) %>%
+  collect
+# Here increased the count, to study cities/states where major no of trips occoured.
+
+ggplot(DestAirportDelay, aes(Destcountry, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(DestAirportDelay, aes(Deststate, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(DestAirportDelay, aes(Destcity, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(DestAirportDelay, aes(Dest, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+```
+
+Again, State seems to have relationship, not country. CA = mean ~15min and AZ seems to be best state with ~13min delay and LOSAngles seems to be best city to fly to as well and even Phonix as well.
+
+
+### Let's plot continous variables and see how they are co-related to each other and to Airline delays.
+
+
+
+```{r,message=FALSE, warning=FALSE}
+continousdelay <- select(tripsplaneairports, ActualElapsedTime, AirTime, ArrDelay, DepDelay, Distance, 
+                         TaxiIn, TaxiOut, CarrierDelay, WeatherDelay, NASDelay, SecurityDelay, LateAircraftDelay)
+# We can use this as well.. 
+# cont <- sapply(tripsplaneairports, is.numeric)
+# tripsplaneairports [, cont]
+# How ever if you want to exclude some of the variables then.. manual selection needed
+# tripsplaneairports [, -cont] # For remaning , mostly categorical or factor variables.
+# If some variables which has numeric values say (1,2,3) for say three different types and should be converted to factor # variables before doing above steps.
+  
+tripscorr <- cor(continousdelay, method="pearson")
+# Let's plot the co-relation matix
+corrplot::corrplot(tripscorr, method="color")
+```
+This clearly provides co-relation between the variables.
+
+### Plot continous variables as well
+
+
+```{r,message=FALSE, warning=FALSE}
+ggplot(tripsplaneairports, aes(Distance, DepDelay)) + geom_point() + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(tripsplaneairports, aes(TaxiIn, DepDelay)) + geom_point() + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(tripsplaneairports, aes(TaxiOut, DepDelay)) + geom_point() + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(tripsplaneairports, aes(CarrierDelay,DepDelay)) + geom_point() + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(tripsplaneairports, aes(WeatherDelay, DepDelay)) + geom_point() + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(tripsplaneairports, aes(NASDelay, DepDelay)) + geom_point() + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(tripsplaneairports, aes(SecurityDelay, DepDelay)) + geom_point() + geom_smooth() + scale_size_area(max_size = 2)
+ggplot(tripsplaneairports, aes(LateAircraftDelay, DepDelay)) + geom_point() + geom_smooth() + scale_size_area(max_size = 2)
+```
+
+
+Now based on exploratory data analysis, we need to choose the variables that are potentially significant and then start the modeling.
+Based on this plot, we can see ArrDelay has positive co-relation with DepDelay, TaxiOut, CarrierDelay, NASDelay, WeatherDelay, LateAirCraftDelay
+And DepDelay has positive co-relation wth TaxiOut, CarrierDelay, NASDelay, WeatherDelay, LateAirCraftDelay
+So, from continous variable point of view, we got the starting point.
+We can also see that the significant variables are not co-related to each other. i.e there is no multico-linearity.
+
+####If the multi-colinirity is present, then we should have addressed. i.e combining variables or picking only most significant one and leaving other. PCA is one of the method to address the same. We don't need here.
+
+
+Now we have fair idea, now let us see variable significane and based on the results  we can choose the best variable combination. We can also statistically, prove what we saw visually befor choosing the final machine learning model.
+
+```{r,message=FALSE, warning=FALSE}
+modeltrips <- na.omit(tripsplaneairports[,c("Dest","Origin", "Month", "DayOfWeek",  "ArrTime", "UniqueCarrier", "ActualElapsedTime", "CRSElapsedTime", 
+                                    "TaxiOut", "Diverted",  "CarrierDelay", "WeatherDelay",    "NASDelay",        "SecurityDelay",   "LateAircraftDelay" ,"ArrHour",        
+                                    "DepHour",         "ArrTimeofday",    "DepTimeofday",       "WeekOfMonth",    "Origincity",      
+                                    "Originstate",   "Destcity", "Deststate" ,  "ArrDelay", "DepDelay" )])
+
+```
+
+#### See each variable, how significant to the DepDelay and ArrDelay
+
+```{r,message=FALSE, warning=FALSE}
+lm.fit1 <- stats::lm(formula = DepDelay ~ factor(Month), data = modeltrips)
+summary(lm.fit1)
+summary(lm.fit1)$r.squared
+summary(lm.fit1)$adj.r.squared
+summary(lm.fit1)$coeff
+anova(lm.fit1)
+```
+
+Month seems to be significant as evident in EDA.
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+lm.fit2 <-  stats::lm(formula = DepDelay ~ factor(DepHour) , data = modeltrips)
+summary(lm.fit2)
+```
+Dep hour seems to be more significant
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+lm.fit3 <-  stats::lm(formula = DepDelay ~ factor(DepTimeofday) , data = modeltrips)
+summary(lm.fit3)
+```
+This seems to be significant
+
+```{r,message=FALSE, warning=FALSE}
+lm.fit4 <-  stats::lm(formula = DepDelay ~ factor(Month) +  factor(DepTimeofday) + factor(DepHour), data = modeltrips)
+summary(lm.fit4)
+```
+This combination seems to be significatnt, Adj R Squared is increasing...
+
+```{r,message=FALSE, warning=FALSE}
+lm.fit5 <-  stats::lm(formula = DepDelay ~ factor(Month) +  factor(DepTimeofday) + factor(DepHour)+ factor(DayOfWeek) + factor(WeekOfMonth), data = modeltrips)
+summary(lm.fit5)
+```
+The Adj R Square is increasing...
+
+Out of above variables, Month and DepHour seems to be predicting better.
+
+```{r,message=FALSE, warning=FALSE}
+lm.fit.com.3 <- stats::lm(formula = DepDelay ~  factor(Month) +  factor(DepTimeofday) + factor(DepHour)+ factor(DayOfWeek) + factor(WeekOfMonth) +  factor(ArrHour) , data = modeltrips) 
+summary(lm.fit.com.3)
+```
+Very different insight. Scheduled ArrHour is better predictor to DepDelay then compared with Secheduled DepHour. 
+The difference is not huge though.
+
+```{r,message=FALSE, warning=FALSE}
+lm.fit6 <-  stats::lm(formula = DepDelay ~ factor(UniqueCarrier),  data = modeltrips)
+summary(lm.fit6)
+```
+Through p-value they seem to be significant, not when we look for R-squared. Let's proceed further.
+
+```{r,message=FALSE, warning=FALSE}
+lm.fit7 <-  stats::lm(formula = DepDelay ~ factor(Originstate) ,  data = modeltrips)
+summary(lm.fit7)
+```
+Seems to have some significance
+
+```{r,message=FALSE, warning=FALSE}
+lm.fit7a <-  stats::lm(formula = DepDelay ~  factor(Deststate),  data = modeltrips)
+summary(lm.fit7a)
+```
+Seems to have some significance
+
+```{r,message=FALSE, warning=FALSE}
+lm.fit7c <-  stats::lm(formula = DepDelay ~ factor(Originstate) + factor(Deststate) + factor(UniqueCarrier),  data = modeltrips)
+summary(lm.fit7c)
+```
+Combining them is better, these seem to be significant.
+
+```{r,message=FALSE, warning=FALSE, results='hide'}
+lm.fit8 <-  stats::lm(formula = DepDelay ~ factor(Origin),  data = modeltrips)
+summary(lm.fit8)
+```
+Seems to be less significant.
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+lm.fit8a <-  stats::lm(formula = DepDelay ~ factor(Dest),  data = modeltrips)
+summary(lm.fit8a)
+```
+It is not so significant.
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+lm.fit9 <-  stats::lm(formula = DepDelay ~ factor(Origincity),  data = modeltrips)
+summary(lm.fit9)
+```
+City also seems to be having some significance.
+Lets check Dest city and see if any combination is better.
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+lm.fit9a <-  stats::lm(formula = DepDelay ~ factor(Destcity),  data = modeltrips)
+summary(lm.fit9a)
+```
+This also seems to be less significance.
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+lm.fit9b <-  stats::lm(formula = DepDelay ~ factor(Origincity) + factor(Destcity),  data = modeltrips)
+summary(lm.fit9b)
+AIC(lm.fit9b)
+BIC(lm.fit9b)
+```
+Both together could explain better variance then with one. However state was better. so we are going with state.
+
+```{r,message=FALSE, warning=FALSE,results='hide'}
+lm.fit10 <-  stats::lm(formula = DepDelay ~ Diverted,  data = modeltrips)
+summary(lm.fit10)
+```
+No significance
+
+
+### Factors and Dummy variables for all significant catagorical variables in the data
+
+Since lm model auto creates required factors for catagorical variables. So we don't exclusively need to create theem.
+
+```{r,message=FALSE, warning=FALSE}
+tripsplaneairports <- na.omit(tripsplaneairports)
+tripsdummy <- model.matrix(~ as.factor(Month)+as.factor(DayOfWeek)+UniqueCarrier
+                          +as.factor(DepHour)+ as.factor(WeekOfMonth) 
+                          +as.factor(ArrHour) + as.factor(Deststate) + as.factor(Originstate) ,data=tripsplaneairports)
+tripsdummy <- tripsdummy[,-1] 
+
+#Instead take all other significant variables here..
+
+# This was to test without creating dummy variables...
+#tripscatogorical <- tripsplaneairports[, c( "Month", "DayOfWeek", "UniqueCarrier", "DepHour", "DepTimeofday" , #"WeekOfMonth" , "ArrHour", "ArrTimeofday" , "Deststate" , "Originstate" )]
+
+#tripscatogorical <- tripscatogorical %>% mutate_if(is.integer,as.factor)
+#tripscatogorical <- tripscatogorical %>% mutate_if(is.character,as.factor)
+#tripscatogorical <- tripscatogorical %>% mutate_if(is.numeric, as.factor)
+
+# Based on the co-relations in EDA
+tripscontinous <- tripsplaneairports[, c( "TaxiOut", "CarrierDelay", "WeatherDelay", "NASDelay", "LateAircraftDelay" )]
+```
+
+Scaling all continous independent variables excluding Dependent variables.
+
+
+```{r,message=FALSE, warning=FALSE}
+tripscontinous <- as.data.frame(scale (tripscontinous)) # substract mean and devide by SD
+
+
+tripscontinous$ArrDelay <- tripsplaneairports$ArrDelay
+tripscontinous$DepDelay <- tripsplaneairports$DepDelay
+tripscontinous <- as.data.frame(tripscontinous)
+
+# Now let's combine trips tripscontinous, tripscatogorical
+nrow(tripscontinous)
+tripsnew <- cbind(tripsdummy, tripscontinous )
+tripsnew <- as.data.frame(tripsnew)
+
+
+```
+
+### Split your dataset nto training, test and validation data set.
+
+```{r,echo=FALSE,message=FALSE, warning=FALSE}
+set.seed(110)
+sub <- sample(nrow(tripsnew), floor(nrow(tripsnew) * 0.5))
+
+traintrips <- tripsnew[sub,]
+remaining <- tripsnew[-sub,]
+
+#Remaining data is agian devided into test and validation
+sub1 <- sample(nrow(remaining), floor(nrow(remaining) * 0.6))
+
+testtrips <- remaining[sub1,]
+validtrips <- remaining[-sub1,]
+
+rm(remaining)
+```
+
+## Create a model to predict flight delays
+
+### Modeling - Apply leniar regression to predict Departure Delays and Arrival Delays
+
+#### Let's start with Departure Delays.
+
+Removing Arrvilal related variables.
+
+```{r,message=FALSE, warning=FALSE}
+traintripsdep <- traintrips[, !grepl("ArrDelay" , names(traintrips))] 
+
+#lm.dep.fit_ini1 <- stats::lm(DepDelay ~ as.factor(Month)+as.factor(DayOfWeek)+UniqueCarrier
+#                         +as.factor(DepHour)+as.factor(DepTimeofday) + as.factor(WeekOfMonth) 
+#                       +as.factor(ArrHour) + as.factor(ArrTimeofday) + 
+#                        as.factor(Deststate) + as.factor(Originstate) , data=traintripsdep)
+#summary(lm.dep.fit_ini1)
+
+#lm.dep.fit_ini2 <- stats::lm( DepDelay ~ TaxiOut + CarrierDelay + WeatherDelay + NASDelay + LateAircraftDelay , #data=traintripsdep)
+#summary(lm.dep.fit_ini2)
+
+lm.dep.fit1 <- stats::lm(DepDelay ~ . , data=traintripsdep)
+
+summary(lm.dep.fit1)
+AIC(lm.dep.fit1)
+BIC(lm.dep.fit1)
+```
+
+At first look. R Squared values look prety good with fit1 . i.e 94%. Also Resudal error: 10.35 is not bad.
+p-value is also good.
+Let's see the training error and validation error!
+
+```{r,echo=FALSE,message=FALSE, warning=FALSE}
+# Predict values on training set
+traintripsdep$pred.DepDelay <- predict(lm.dep.fit1)
+traintripsdep$error <- residuals(lm.dep.fit1)
+
+
+#  Predict values on validation set
+validtrips$predict.DepDelay <- predict(lm.dep.fit1,
+                                       newdata=validtrips)
+validtrips$error <- 
+  validtrips$predict.DepDelay - validtrips$DepDelay
+
+valid_rmse <- sqrt(mean(abs(validtrips$error)^2))
+valid_rmse
+# RMSE: is good as well. ~10
+
+valid_mape <- mean(abs(validtrips$error/sapply(validtrips$DepDelay, function(x) if ( x == 0 ) 1 else x )))
+valid_mape
+# mean absolute percentage error looks prety good. ~1.5%
+
+mean(abs(validtrips$error))
+
+# Mean absolute deviation
+
+
+```
+### Ploting the results
+```{r,message=FALSE, warning=FALSE}
+# Check residual plots
+hist(traintripsdep$error)
+hist(validtrips$error)
+```
+
+In both cases the histogram is centered at zero. Espicially with Test data. This is a good test.
+Follows nornal distribution which is a good measure of model performance.
+
+#### Corelation
+```{r,message=FALSE, warning=FALSE}
+# Correlation
+a<-cor(traintripsdep$DepDelay,
+       traintripsdep$pred.DepDelay )
+b<-cor(validtrips$DepDelay,
+       validtrips$predict.DepDelay )
+a
+b
+
+a*a
+b*b
+```
+
+#### Corelation between actul and predicted is very high satisfying the accuracy of the model.
+
+```{r,message=FALSE, warning=FALSE}
+plot(traintripsdep$DepDelay, 
+     traintripsdep$pred.DepDelay )
+
+plot(validtrips$DepDelay, 
+     validtrips$predict.DepDelay )
+```
+If we look at the Actual vs Predicted it almost follows stright line over diaognal.
+
+```{r,message=FALSE, warning=FALSE}
+plot(traintripsdep$error, 
+     traintripsdep$pred.DepDelay )
+
+plot(validtrips$error, 
+     validtrips$predict.DepDelay )
+```
+Follows normal distributuon.
+Model performance is good and accuracy is good as well.
+
+```{r,message=FALSE, warning=FALSE}
+qplot(y=traintripsdep$error)
+qplot(y=validtrips$error)
+```
+There are very few outliers which is good as well. 
+
+#### regularization: I don't think it is needed here as co-efficients are not very large. We are not getting any additional benifit.
+
+```{r,message=FALSE, warning=FALSE}
+fitControl <- trainControl(method = "cv", number = 10)  # Cross validation
+
+#ridge.dep.fit1 <- train(DepDelay ~ ., data=traintripsdep, method ='ridge', trControl=fitControl, preProcess= c("scale", "center"))
+
+#lasso.dep.fit2 <- train(DepDelay ~ . , data=traintripsdep, method ='lasso', trControl=fitControl, preProcess= c("scale", "center"))
+
+#summary(ridge.dep.fit1)
+#summar(lasso.dep.fit2)
+
+```
+
+###### Let us see if we are able to get any advantage by doing Principal component analysis:
+
+
+```{r,message=FALSE, warning=FALSE}
+
+# First remove predictor variable Depdelay and apply
+
+prcomptrainDepdelayvar <- traintripsdep[, grepl("Depdelay" , names(traintrips))] 
+
+prcomptraindepdelaydata <- traintripsdep[, !grepl("DepDelay" , names(traintrips))] 
+
+prin_comp <- prcomp(prcomptraindepdelaydata )
+
+#compute standard deviation of each principal component
+std_dev <- prin_comp$sdev
+
+#compute variance
+pr_var <- std_dev^2
+
+#check variance of first 10 components
+
+pr_var[1:10]
+
+#proportion of variance explained
+prop_varex <- pr_var/sum(pr_var)
+prop_varex[1:20]
+
+#scree plot
+plot(prop_varex, xlab = "Principal Component",
+             ylab = "Proportion of Variance Explained",
+             type = "b")
+
+#cumulative scree plot
+plot(cumsum(prop_varex), xlab = "Principal Component",
+              ylab = "Cumulative Proportion of Variance Explained",
+              type = "b")
+```
+
+### From this looks like first 10 components capture more than 99% of variance. Let's use first 10 and see howe we predict.
+
+```{r,message=FALSE, warning=FALSE}
+
+newprcomptrain <- data.frame(DepDelay = traintripsdep$DepDelay, prin_comp$x)
+
+newprcomptrain <- newprcomptrain[,1:11]
+
+lm.fit.prcomp1 <-  stats::lm(DepDelay ~ . , data=newprcomptrain)
+
+summary(lm.fit.prcomp1)
+AIC(lm.fit.prcomp1)
+BIC(lm.fit.prcomp1)
+
+# This is unbelievable.... Let's see how this works on test data and validation data.. 
+
+
+prcompvalid <- validtrips[, !grepl("Depdelay" , names(validtrips))] 
+prcomptest <- testtrips[, !grepl("DepDelay" , names(testtrips))] 
+
+
+prin_comp_valid <- predict(prin_comp, newdata = prcompvalid)
+prin_comp_valid <- as.data.frame(prin_comp_valid)
+
+prin_comp_valid <- prin_comp_valid[,1:10] # 10 components
+
+# Predict values on training set
+traintripsdep$pred.DepDelay <- predict(lm.fit.prcomp1)
+traintripsdep$error <- residuals(lm.fit.prcomp1)
+
+
+#  Predict values on validation set
+validtrips$predict.DepDelay <- predict(lm.fit.prcomp1,
+                                       newdata=prin_comp_valid)
+validtrips$error <- 
+  validtrips$predict.DepDelay - validtrips$DepDelay
+
+valid_rmse <- sqrt(mean(abs(validtrips$error)^2))
+valid_rmse
+# RMSE: is good as well. ~10
+
+valid_mape <- mean(abs(validtrips$error/sapply(validtrips$DepDelay, function(x) if ( x == 0 ) 1 else x )))
+valid_mape
+# mean absolute percentage error looks prety good. ~1.5%
+
+mean(abs(validtrips$error))
+
+
+
+
+```
+
+### Ploting the results of PCA prediction
+```{r,message=FALSE, warning=FALSE}
+# Check residual plots
+hist(traintripsdep$error)
+
+hist(validtrips$error)
+```
+
+#### Almost perfect normal distribution
+
+```{r,message=FALSE, warning=FALSE}
+# Correlation
+a<-cor(traintripsdep$DepDelay,
+       traintripsdep$pred.DepDelay )
+b<-cor(validtrips$DepDelay,
+       validtrips$predict.DepDelay )
+a
+b
+
+a*a
+b*b
+
+plot(traintripsdep$DepDelay, 
+     traintripsdep$pred.DepDelay )
+
+plot(validtrips$DepDelay, 
+     validtrips$predict.DepDelay )
+```
+
+####If we look at the Actual vs Predicted it almost follows stright line over diaognal
+
+
+```{r,message=FALSE, warning=FALSE}
+plot(traintripsdep$error, 
+     traintripsdep$pred.DepDelay )
+
+plot(validtrips$error, 
+     validtrips$predict.DepDelay )
+```
+
+#### Model performance is good and accuracy is good as well.
+
+```{r,message=FALSE, warning=FALSE}
+qplot(y=traintripsdep$error)
+qplot(y=validtrips$error)
+
+```
+
+
+Though we have tested each and every independent variable and max combinations before choosing final model. 
+We have used alternate methods to choose variables. One of such methods is AIC. This takes combinations of variables and computes statistics. We have run STEP AIC and even with the first model seems to be best. Not showing STEPAIC here to save some real estate. In the actual code file we have it.
+
+#### Finally we can see that out first model is better. 
+#### Even if we get better model by tweeking the variables. It may not do well on completely new data.
+#### Let's verify both the models on test data set and conclude at the end.
+
+### Now it's time to predict ArrDelay as well. We can use DespDelay as well for predicting Arrival Delay.
+
+Here, we can assume that DepDelay information is available and predict!. There is strong co-relation between two. This will be a very good predictor. Also, later we will make DepDelay not available and predict. 
+
+```{r,message=FALSE, warning=FALSE}
+traintripsArr <- traintrips
+#traintripsArr <- traintrips[, !grepl("DepDelay" , names(traintrips))]  # Removing Arrvilal related variables.
+
+lm.arr.fit1 <- stats::lm(ArrDelay ~ . , data=traintripsArr)
+
+summary(lm.arr.fit1)
+```
+
+#### R-Squared: 97 and Residual error: 7
+
+```{r,echo=FALSE, ,message=FALSE, warning=FALSE}
+# Predict values on training set
+traintripsArr$pred.ArrDelay <- predict(lm.arr.fit1)
+traintripsArr$ArrError <- residuals(lm.arr.fit1)
+
+
+#  Predict values on validation set
+validtrips$predict.ArrDelay <- predict(lm.arr.fit1,
+                                       newdata=validtrips)
+validtrips$ArrError <- 
+  validtrips$predict.ArrDelay - validtrips$ArrDelay
+
+valid_rmse <- sqrt(mean(abs(validtrips$ArrError)^2))
+valid_rmse
+# RMSE: is good as well. ~10
+
+valid_mape <- mean(abs(validtrips$ArrError/sapply(validtrips$ArrDelay, function(x) if ( x == 0 ) 1 else x )))
+valid_mape
+# mean absolute percentage error looks prety good. ~1.5%
+
+mean(abs(validtrips$ArrError))
+
+# Mean absolute deviation
+
+
+```
+### Plots For Arrival Delay
+
+```{r, message=FALSE, warning=FALSE}
+# Check residual plots
+hist(traintripsArr$ArrError)
+hist(validtrips$ArrError)
+```
+In both cases the histogram is centered at zero. Espicially with Test data. This is a good test.
+Follows nornal distribution which is a good measure of model performance.
+
+#### Correlation
+```{r, message=FALSE, warning=FALSE}
+a<-cor(traintripsArr$ArrDelay,
+       traintripsArr$pred.ArrDelay )
+b<-cor(validtrips$ArrDelay,
+       validtrips$predict.ArrDelay )
+a
+b
+
+a*a
+b*b
+```
+co-relation between actul and predicted is very high satisfying the accuracy of the model.
+
+```{r,message=FALSE, warning=FALSE}
+plot(traintripsArr$ArrDelay, 
+     traintripsArr$pred.ArrDelay )
+
+plot(validtrips$ArrDelay, 
+     validtrips$predict.ArrDelay )
+```
+If we look at the Actual vs Predicted it almost follows stright line over diaognal.
+
+```{r,message=FALSE, warning=FALSE}
+plot(traintripsArr$ArrError, 
+     traintripsArr$pred.ArrDelay )
+
+plot(validtrips$ArrError, 
+     validtrips$predict.ArrDelay )
+
+qplot(y=traintripsArr$ArrError)
+qplot(y=validtrips$ArrError)
+```
+
+Follows normal distributuon.
+#### Model performance is good and accuracy is good as well.
+
+#### We can try removing DepDelay (independent variable) and try and predict the ArrDelay. 
+Not showing all the plotsto sae some realestate. But in actual code file, we have it. 
+
+```{r, echo=FALSE,message=FALSE, warning=FALSE}
+traintripsArr <- traintrips[, !grepl("DepDelay" , names(traintrips))]  # Removing Arrvilal related variables.
+
+str(traintripsdep)
+ncol(traintripsdep)
+
+lm.arr.fit2 <- stats::lm(ArrDelay ~ . , data=traintripsArr)
+summary(lm.arr.fit2)
+```
+
+### R-Squared: 96.8 and Residual error: 8. Even this seems to be good. 
+It may predict well on Validation data set.
+
+
+#### Even here model performance is good and accuracy is good as well.
+#### We can use eaither of the models. If it is for predicting much earlier say week before the flight, then we don't have DepDelay info so we can use second on. But if you are using for realtime flight delay prediction than we can use first one.
+
+
+#### Finally, we need to apply this model to test data set to see the results.
+### And once this is ready, we need to use the final model in function which accepts these input variables as parameters and predicts the delay.
+
+
+### For Departure.
+
+```{r,message=FALSE, warning=FALSE}
+#  Predict values on test set
+testtrips$predict.DepDelay <- predict(lm.dep.fit1,
+                                       newdata=testtrips)
+testtrips$DepError <- 
+  testtrips$predict.DepDelay - testtrips$DepDelay
+
+test_rmse <- sqrt(mean(abs(testtrips$DepError)^2))
+test_rmse
+# RMSE: is good as well. ~10
+
+test_mape <- mean(abs(testtrips$DepError/sapply(testtrips$DepDelay, function(x) if ( x == 0 ) 1 else x )))
+test_mape
+# mean absolute percentage error looks prety good. ~1.5%
+
+mean(abs(testtrips$DepError))
+
+# Mean absolute deviation
+
+
+hist(testtrips$DepError)
+```
+#### In both cases the histogram is centered at zero on test data which is good.
+#### Follows nornal distribution which is a good measure of model performance.
+#### The accuracy seems to be better then validation data set for departure.
+
+### For Arrival.
+```{r,message=FALSE, warning=FALSE}
+#  Predict values on test set
+testtrips$predict.ArrDelay <- predict(lm.arr.fit2,
+                                       newdata=testtrips)
+testtrips$ArrError <- 
+  testtrips$predict.ArrDelay - testtrips$ArrDelay
+
+test_rmse <- sqrt(mean(abs(testtrips$ArrError)^2))
+test_rmse
+# RMSE: is good as well. ~10
+
+test_mape <- mean(abs(testtrips$ArrError/sapply(testtrips$ArrDelay, function(x) if ( x == 0 ) 1 else x )))
+test_mape
+# mean absolute percentage error looks prety good. ~1.5%
+
+mean(abs(testtrips$ArrError))
+hist(testtrips$ArrError)
+```
+
+This is a good test.
+Follows nornal distribution which is a good measure of model performance.
+
+
+#### Accuracy is good for test data set as well. Too many plots. Let's stop here. 
+### So the model coosen for production are lm.dep.fita for Departure and  lm.arr.fit2 for Arrival.
+
+### Now let's answer some other questions. 
+
+## Can you detect cascading failures as delays in one airport create delays in others? 
+## Are there critical links in the system?
+
+Now let's take e.g: Let's Say. 
+Delays (Both ArrDelay and DepDelay) in Origin at a given time can cause Delays in later time at Dependent Dest.
+
+So need to have mean delays by time at both Upstream Airports and downstream airports and join the.
+
+### Defining downstream Airport 
+
+```{r, message=FALSE, warning=FALSE}
+
+library(dplyr)
+
+DownstreamAirport <- dplyr::select (tripsplaneairports, Origin, Dest, DepDelay, ArrDelay, DepTimeofday, ArrTimeofday, ArrHour, DepHour )
+
+DownstreamAirportDepDelay <- DownstreamAirport %>% 
+  group_by( Dest, ArrHour  ) %>%
+  summarise( DSAPDepDelay = mean(DepDelay)) 
+
+DownstreamAirportArrDelay <- DownstreamAirport %>% 
+  group_by( Origin, DepHour  ) %>%
+  summarise( DSAPArrDelay = mean(ArrDelay)) 
+
+# Now lets join
+DownstreamAirportDelays <- merge(x=DownstreamAirportDepDelay, y=DownstreamAirportArrDelay, by.x = c("Dest", "ArrHour"), by.y= c("Origin", "DepHour"))
+
+colnames(DownstreamAirportDelays) <- c("DownStreamAirport",  "Hour", "DSAPDepDelay", "DSAPArrDelay" )
+head(DownstreamAirportDelays)
+```
+
+### Defining upstream Airport 
+
+```{r, message=FALSE, warning=FALSE}
+# Upstream Airport
+UpstreamAp <- dplyr::select (tripsplaneairports, Origin, Dest, DepDelay, ArrDelay, DepTimeofday, ArrTimeofday, ArrHour, DepHour )
+  
+  UpstreamAirportDepDelay <- UpstreamAp %>% 
+    group_by( Dest, ArrHour  ) %>%
+    summarise( DSAPDepDelay = mean(DepDelay)) 
+  
+  UpstreamAirportArrDelay <- UpstreamAp %>% 
+    group_by( Origin, DepHour  ) %>%
+    summarise( DSAPArrDelay = mean(ArrDelay)) 
+  
+  # Now lets join
+  
+  UpstreamAirportDelays <- merge(x=UpstreamAirportDepDelay, y=UpstreamAirportArrDelay, by.x = c("Dest", "ArrHour"), by.y= c("Origin", "DepHour"))
+  
+  colnames(UpstreamAirportDelays) <- c("UpstreamAirport",  "UpstreamHour", "UPAPDepDelay", "UPAPArrDelay" )
+  head(UpstreamAirportDelays)
+```
+
+### Linking upstream and downstream Airports
+
+```{r, message=FALSE, warning=FALSE}
+# Link between downstream airport and upstream airport
+UpstreamDownStreamLink <- UpstreamAp %>% 
+  group_by( Origin, Dest, DepHour, ArrHour  ) %>%
+  summarise( MeanDepDelay = mean(DepDelay), MeanArrDelay= mean(ArrDelay)) 
+
+# Linking Downstream Airport and Link table
+DownStreamUpstreamDelaySummary <- merge(x=DownstreamAirportDelays, y=UpstreamDownStreamLink, by.x = c("DownStreamAirport", "Hour"), by.y= c("Dest", "ArrHour")) # The Link is always #ArrHour
+ 
+head(DownStreamUpstreamDelaySummary)
+
+# Now link to upstream airport 
+
+DownStreamUpstreamDelaySummaryfinal <- merge( x=UpstreamAirportDelays, y=DownStreamUpstreamDelaySummary, by.y = c("Origin", "DepHour") , by.x= c("UpstreamAirport",  "UpstreamHour"))
+
+CascadingSummary <- DownStreamUpstreamDelaySummaryfinal %>% 
+                    group_by(DownStreamAirport, Hour )  %>%
+                    summarize(DSAPDelay = mean(DSAPDepDelay+DSAPArrDelay), UPAPDelay = mean(UPAPDepDelay+UPAPDepDelay), MeanDSAPDepDelay = mean(DSAPDepDelay), MeanDSAPArrDelay = mean(DSAPArrDelay) , MeanUPAPDepDelay =  mean(UPAPDepDelay), MeanUPAPDelay = mean(UPAPArrDelay) ) %>%
+                    filter (DSAPDelay > -121 , DSAPDelay < 121 , UPAPDelay > -121  , UPAPDelay < 121 )
+                    # Filering to avoid outliers... some which are more then 300min delays, these have different #reasons...  
+
+head(CascadingSummary)
+```
+
+### Now let's plot to see the relationship
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(CascadingSummary, aes(UPAPDelay, DSAPDelay)) + geom_point() + geom_smooth() + xlab("Upstream Airport  Delay") + ylab("Downstream Airport  Delay")
+
+ggplot(CascadingSummary, aes(UPAPDelay, MeanDSAPDepDelay)) + geom_point() + geom_smooth() + xlab("Upstream Airport  Delay") + ylab("Downstream Airport Dep Delay")
+
+ggplot(CascadingSummary, aes(UPAPDelay, MeanDSAPArrDelay)) + geom_point() + geom_smooth() + xlab("Upstream Airport  Delay") + ylab("Downstream Airport Arr Delay")
+
+# We can clearly see relationship
+# Let's look into co-relation
+
+CascadingSummary_for_cor <- CascadingSummary[,3:8]
+
+head(CascadingSummary_for_cor)
+
+cascad_cor <- cor(CascadingSummary_for_cor, method="pearson")
+# Let's plot the co-relation matix
+corrplot::corrplot(cascad_cor, method="color")
+# This clearly provides co-relation between the variables.
+cor(CascadingSummary$DSAPDelay, CascadingSummary$UPAPDelay )
+
+```
+
+### We can see positive co-relation ~0.40, It may be a good predictor. This would definitely improve if we add more parameters such as day of the week etc... 
+
+## Let's say we want to include UPAPDelay as parameter for predicting Delays. We can write a function  first to get the Upstream Delay (UPAP Delay). This function we should restrict to may be max week worth of data to get mean delay. As we move closer to departure, we can then just take that days delay and predict more accurately.
+
+```{r,message=FALSE, warning=FALSE}
+
+fun_cascadingAirportDelay <- function(Airportval, Traveldateval, Hourval,  Timeframedaysval, Delaytypeval ="Dep"  ) {
+  
+  library(lubridate)
+  
+  Cascading_InterestedData <- tripsplaneairports %>% 
+    filter( TravelDate > (ymd(Traveldateval) - days(Timeframedaysval) ), TravelDate <= Traveldateval )
+  
+    #Cascading_InterestedData <- tripsplaneairports %>% 
+    #filter( TravelDate > (ymd("2007-10-10") - days(15) ), TravelDate <= "2007-10-10") # %>%
+      #filter (Dest == "ABE")
+  
+  nrow(Cascading_InterestedData)
+  
+  head(Cascading_InterestedData)
+    
+
+    DownstreamAirportDepDelay <- Cascading_InterestedData %>% 
+    filter( Dest == Airportval , ArrHour == Hourval ) %>%
+    group_by( Dest, ArrHour  ) %>% 
+    summarise( DSAPDepDelay = mean(DepDelay)) 
+  
+  DownstreamAirportArrDelay <- Cascading_InterestedData %>% 
+    filter( Origin == Airportval , DepHour == Hourval ) %>%
+    group_by( Origin, DepHour  ) %>%
+    summarise( DSAPArrDelay = mean(ArrDelay)) 
+  
+  # Now lets join
+  
+  DownstreamAirportDelays <- merge(x=DownstreamAirportDepDelay, y=DownstreamAirportArrDelay, by.x = c("Dest", "ArrHour"), by.y= c("Origin", "DepHour"))
+  
+  colnames(DownstreamAirportDelays) <- c("DownStreamAirport",  "Hour", "DSAPDepDelay", "DSAPArrDelay" )
+  
+  # Upstream Airport
+  
+  UpstreamAp <- dplyr::select (Cascading_InterestedData, Origin, Dest, DepDelay, ArrDelay, DepTimeofday, ArrTimeofday, ArrHour, DepHour )
+  
+  UpstreamAirportDepDelay <- UpstreamAp %>% 
+    group_by( Dest, ArrHour  ) %>%
+    summarise( DSAPDepDelay = mean(DepDelay)) 
+  
+  UpstreamAirportArrDelay <- UpstreamAp %>% 
+    group_by( Origin, DepHour  ) %>%
+    summarise( DSAPArrDelay = mean(ArrDelay)) 
+  
+  # Now lets join
+  
+  UpstreamAirportDelays <- merge(x=UpstreamAirportDepDelay, y=UpstreamAirportArrDelay, by.x = c("Dest", "ArrHour"), by.y= c("Origin", "DepHour"))
+  
+  colnames(UpstreamAirportDelays) <- c("UpstreamAirport",  "UpstreamHour", "UPAPDepDelay", "UPAPArrDelay" )
+  
+  # Link between downstream airport and upstream airport
+  
+  UpstreamDownStreamLink <- UpstreamAp %>% 
+    group_by( Origin, Dest, DepHour, ArrHour  ) %>%
+    summarise( MeanDepDelay = mean(DepDelay), MeanArrDelay= mean(ArrDelay)) 
+
+
+  # Linking Downstream Airport and Link table
+  DownStreamUpstreamDelaySummary <- merge(x=DownstreamAirportDelays, y=UpstreamDownStreamLink, by.x = c("DownStreamAirport", "Hour"), by.y= c("Dest", "ArrHour"))
+  
+  # Now link to upstream airport 
+  
+  DownStreamUpstreamDelaySummaryfinal <- merge( x=UpstreamAirportDelays, y=DownStreamUpstreamDelaySummary, by.y = c("Origin", "DepHour") , by.x= c("UpstreamAirport",  "UpstreamHour"))
+  
+  head(DownStreamUpstreamDelaySummaryfinal)
+  
+  CascadingSummary <- DownStreamUpstreamDelaySummaryfinal %>% 
+    group_by(DownStreamAirport, Hour )  %>%
+    summarize(UPAPDelay = mean(UPAPArrDelay+UPAPDepDelay),  meanUPAPDepdelay = mean(UPAPDepDelay), meanUPAPArrDelay = mean(UPAPArrDelay) ) 
+  
+  CascadingSummary[is.na(CascadingSummary)] <- 0 # Just replacing Nas with zero
+  
+  #result <- c(CascadingSummary$meanUPAPDepdelay,CascadingSummary$meanUPAPArrDelay )
+  #return(result)
+  
+  return (if(Delaytypeval=="Dep") {CascadingSummary$meanUPAPDepdelay} else {CascadingSummary$meanUPAPArrDelay})
+
+#return( if(is.empty(CascadingSummary$meanUPAPDepdelay)) 0 else CascadingSummary$meanUPAPDepdelay  , #if(is.empty(CascadingSummary$meanUPAPArrDelay)) 0 else CascadingSummary$meanUPAPArrDelay )
+  
+}
+
+```
+#### Now we can run the function to see how we are able to get MeanUpstreamAirport Delay, By passing Dependent Airport and an hour of interest.
+
+```{r,message=FALSE, warning=FALSE}
+#Parameters required:    Airportval, Traveldateval, Hourval, Timeframeval = "weeks"
+fun_cascadingAirportDelay ("LAS", "2008-10-10",  12, 7, "Dep" )
+fun_cascadingAirportDelay ("LAS", "2007-10-10",  10, 7 )
+fun_cascadingAirportDelay ("SLC", "2007-10-10",  10, 7, "Arr" )
+```
+
+#### We can use this to create additional feature in the data set. Since the co-relation seems not so great. We are leaving this here. However, in-live systems we can use this to predict delays in-realtime.
+#### This can be used to predict flight delays closer to the time of flying because that is the time the delays in Upstream Airports will be available.
+
+###### This ends our Analysis... Below we try to explore the same concepts on Big Data Spark systems. 
+
+## Running same analysis on BigData/Spark
+#### Connecting to Spark Local server
+
+```{r,message=FALSE, warning=FALSE}
+sc <- spark_connect(master = "local")
+```
+
+#### Loading Large data files
+```{r,echo=FALSE,message=FALSE, warning=FALSE}
+#setwd("D:/Data Science/Flight Data Analysis/")
+#getwd()
+
+#sc_trips2007tbl <- spark_read_csv(sc, "sc_trips2007", ".\\Data\\2007.csv", delimiter = "," , memory = TRUE, overwrite = TRUE)
+#sc_trips2008tbl <- spark_read_csv(sc, "sc_trips2008", ".\\Data\\2008.csv", , delimiter = "," , memory = TRUE, overwrite = TRUE)
+
+# First tried loading files directly.
+
+
+# Traditional R route.
+tripsboth <- as.data.frame(trips)
+trips_tbl2 <- copy_to(sc, tripsboth, "trips2" , overwrite = TRUE)
+```
+
+## Exploratory Data Analysis
+
+### Carrier on-time performance 
+```{r,message=FALSE, warning=FALSE}
+tripsdelayCarrier <- trips_tbl2 %>% 
+  group_by(UniqueCarrier) %>%
+  summarise(count=n(), MeanArrDelay=mean(ArrDelay), MeanDepdelay=mean(DepDelay)) %>%
+  filter (count > 20 ) %>%
+  collect
+#Plot the delay
+
+ggplot(tripsdelayCarrier, aes(UniqueCarrier, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + scale_size_area(max_size = 2)
+```
+
+### Delays in each month
+```{r,message=FALSE, warning=FALSE}
+tripsdelayMonth <- trips_tbl2 %>% 
+  group_by(Month) %>%
+  summarise(count=n(), MeanArrDelay=mean(ArrDelay), MeanDepdelay=mean(DepDelay)) %>%
+  filter (count > 20 ) %>%
+  collect
+#Plot the delay
+
+ggplot(tripsdelayMonth, aes(Month, MeanArrDelay)) + geom_point(aes(size=count), alpha=1/2) + geom_smooth() + scale_size_area(max_size = 2)
+```
+
+### Linear regression with Spark ML Lib (Just an example)
+
+```{r,echo=FALSE,message=FALSE, warning=FALSE}
+# Let's remove all the NAs and partition data  
+model_partition <- trips_tbl2 %>% 
+  filter( !is.na(DepDelay) & !is.na(WeatherDelay) &  !is.na(Month) ) %>%
+  sdf_partition(tripstrain = 0.7, tripsvalid = 0.3, seed = 5555) 
+
+
+# Fit a linear model
+mlfit1 <- model_partition$tripstrain %>%
+  ml_linear_regression(DepDelay ~ WeatherDelay + Month  )
+```
+Summarize the linear model
+```{r,message=FALSE, warning=FALSE,message=FALSE, warning=FALSE}
+summary(mlfit1)
+```
+
+###R-Squared: 68%, RMSE: 41.33. Not a great thing, however these variables are not sufficuent 
+
+From results it's clear that we don't necessirly have choosen all the features. 
+We can continue same steps we did on R on spark environment as well and surely we will have similar results.
+Leaving this here given my Spark session terminates frequently and RStudio behaving not as expected.  
+
+## Conclusion:
+
+It's a great experience to know what goes behind the screen in flying..... so much fun... and so much more to do before this can be used in real-time.
+
+### Future imporovements and suggestios
+
+1. We have taken only sample data hence peformance possibly be enhanced by running same analysis on Spark. But steps wouldn't change much.
+2. We could also pre-define what is delay, i.e more then certain minutes as delay (e.g: more then 10min as delay) and turn this into Classification problem. And once classified then start predicting the delay minutes using linear regression. To check if there is alternates that can add value. 
+3. Airport Cascading delays, precalculated transformed features can be used in model prediction for realtime delays. 
+4. Before using this model in production, there is some work to be done listed above. And ofcourse, we need to modularize the code and create functions for all repetative tasks. Also, create functions to answer questions. 
+
+
+
+
+
+
+
+
+
+
